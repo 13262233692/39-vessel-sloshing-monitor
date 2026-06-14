@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { WebsocketService } from './websocket.service';
 import { TankService } from '../tank/tank.service';
 import { ConfigService } from '../config/config.service';
+import { BallastControlService } from '../ballast/ballast-control.service';
 
 @WebSocketGateway({
   cors: { origin: '*' },
@@ -24,6 +25,7 @@ export class SloshingGateway implements OnGatewayConnection, OnGatewayDisconnect
     private websocketService: WebsocketService,
     private tankService: TankService,
     private config: ConfigService,
+    private ballastControl: BallastControlService,
   ) {}
 
   afterInit() {
@@ -97,5 +99,38 @@ export class SloshingGateway implements OnGatewayConnection, OnGatewayDisconnect
   @SubscribeMessage('ping')
   handlePing(): { type: string; timestamp: number } {
     return { type: 'pong', timestamp: Date.now() };
+  }
+
+  @SubscribeMessage('get_ballast_status')
+  handleGetBallastStatus(): { type: string; decision: any; ballastStates: any } {
+    const decision = this.ballastControl.getLastDecision();
+    const ballastStates = Array.from(this.ballastControl.getCurrentBallastStates().entries()).map(
+      ([id, state]) => ({
+        tankId: id,
+        side: state.side,
+        currentVolume: state.currentVolume,
+        maxVolume: state.maxVolume,
+        fillableVolume: state.fillableVolume,
+        dischargeableVolume: state.dischargeableVolume,
+      })
+    );
+    return {
+      type: 'ballast_status',
+      decision: decision ? {
+        mode: decision.controlMode,
+        eccentricMoment: decision.eccentricMoment,
+        restoringDeficit: decision.restoringDeficit,
+        commands: decision.commands,
+        safetyMargin: decision.safetyMargin,
+        hexPayload: decision.hexPayload,
+      } : null,
+      ballastStates,
+    };
+  }
+
+  @SubscribeMessage('reset_ballast_integral')
+  handleResetBallastIntegral(): { type: string; result: string } {
+    this.ballastControl.resetIntegralError();
+    return { type: 'ballast_reset', result: 'ok' };
   }
 }

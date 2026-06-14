@@ -6,6 +6,7 @@ import { SloshingService, AdvancedAnalysisResult } from '../sloshing/sloshing.se
 import { WebsocketService } from '../websocket/websocket.service';
 import { ConfigService } from '../config/config.service';
 import { WorkerPoolService } from '../worker/worker-pool.service';
+import { BallastControlService } from '../ballast/ballast-control.service';
 
 interface BatchItem {
   data: SensorCleanedData;
@@ -36,6 +37,7 @@ export class DataPipelineService implements OnModuleInit, OnModuleDestroy {
     private websocket: WebsocketService,
     private config: ConfigService,
     private workerPool: WorkerPoolService,
+    private ballastControl: BallastControlService,
   ) {}
 
   onModuleInit() {
@@ -57,6 +59,8 @@ export class DataPipelineService implements OnModuleInit, OnModuleDestroy {
             gzCurve: result.gzCurve,
             stabilitySensitivities: result.stabilitySensitivities,
           });
+
+          this.ballastControl.processAdvancedAnalysis(tankId, result);
         }
       );
       this.cleanupFns.push(unsub);

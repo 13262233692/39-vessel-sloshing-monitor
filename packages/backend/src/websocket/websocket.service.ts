@@ -109,6 +109,12 @@ export class WebsocketService {
     this.io.emit('worker_metrics', { type: 'worker_metrics', ...metrics, timestamp: Date.now() });
   }
 
+  broadcastBallastControl(decision: any): void {
+    if (!this.io) return;
+    this.io.emit('ballast_control', { type: 'ballast_control', ...decision });
+    this.stats.messagesSent++;
+  }
+
   clientConnected(): void {
     this.stats.clientsConnected++;
     console.log(`[WebSocket] Client connected. Total: ${this.stats.clientsConnected}`);

@@ -5,9 +5,10 @@ import { TankModule } from '../tank/tank.module';
 import { SloshingModule } from '../sloshing/sloshing.module';
 import { WebsocketModule } from '../websocket/websocket.module';
 import { WorkerModule } from '../worker/worker.module';
+import { BallastModule } from '../ballast/ballast.module';
 
 @Module({
-  imports: [InfluxModule, TankModule, SloshingModule, WebsocketModule, WorkerModule],
+  imports: [InfluxModule, TankModule, SloshingModule, WebsocketModule, WorkerModule, BallastModule],
   providers: [DataPipelineService],
   exports: [DataPipelineService],
 })
