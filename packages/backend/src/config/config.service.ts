@@ -78,4 +78,8 @@ export class ConfigService {
   getTankConfig(tankId: string): TankConfig | undefined {
     return this.tankConfigs.find((t) => t.id === tankId);
   }
+
+  getAllTankConfigs(): TankConfig[] {
+    return this.tankConfigs.slice();
+  }
 }

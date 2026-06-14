@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import {
   SensorCleanedData,
   SloshingAnalysisResult,
@@ -10,26 +10,82 @@ import {
   calculateStabilityIndex,
   calculateSloshingSeverity,
   DEFAULT_SLOSHING_PARAMS,
+  SloshingSeverity,
 } from '@vessel/shared';
 import { TankService } from '../tank/tank.service';
 import { InfluxService } from '../influx/influx.service';
+import { WorkerPoolService } from '../worker/worker-pool.service';
+import { MatrixTask } from '../worker/matrix.worker';
+
+export interface AdvancedAnalysisResult {
+  gzCurve?: {
+    angles: number[];
+    gz: number[];
+    maxGZ: number;
+    angleOfMaxGZ: number;
+    range: number;
+  };
+  stabilitySensitivities?: Array<{
+    param: string;
+    sensitivity: number;
+    partialDerivative: number;
+  }>;
+  jacobian?: number[][];
+}
 
 interface TankAnalysisState {
   waveStates: WaveState[];
   startTime: number;
   lastWaveHeight: number;
   maxImpactForce: number;
+  lastAdvancedAnalysisAt: number;
+  advancedAnalysisIntervalMs: number;
+  severity: SloshingSeverity;
+  lastAdvancedResult?: AdvancedAnalysisResult;
 }
+
+const SEVERITY_TO_ADVANCED_INTERVAL: { [K in SloshingSeverity]: number } = {
+  [SloshingSeverity.NONE]: 2000,
+  [SloshingSeverity.LOW]: 1000,
+  [SloshingSeverity.MODERATE]: 500,
+  [SloshingSeverity.HIGH]: 200,
+  [SloshingSeverity.CRITICAL]: 100,
+  [SloshingSeverity.EXTREME]: 50,
+};
 
 @Injectable()
 export class SloshingService {
+  private readonly logger = new Logger(SloshingService.name);
   private analysisStates = new Map<string, TankAnalysisState>();
   private readonly SURFACE_SAMPLE_COUNT = 100;
+  private readonly SURFACE_SMOOTHING = 0.3;
+
+  private advancedAnalysisCallbacks = new Map<
+    string,
+    Array<(tankId: string, result: AdvancedAnalysisResult) => void>
+  >();
 
   constructor(
     private tankService: TankService,
     private influx: InfluxService,
+    private workerPool: WorkerPoolService,
   ) {}
+
+  onAdvancedAnalysis(
+    tankId: string,
+    cb: (tankId: string, result: AdvancedAnalysisResult) => void
+  ): () => void {
+    const list = this.advancedAnalysisCallbacks.get(tankId) || [];
+    list.push(cb);
+    this.advancedAnalysisCallbacks.set(tankId, list);
+    return () => {
+      const arr = this.advancedAnalysisCallbacks.get(tankId);
+      if (arr) {
+        const idx = arr.indexOf(cb);
+        if (idx > -1) arr.splice(idx, 1);
+      }
+    };
+  }
 
   analyze(data: SensorCleanedData): SloshingAnalysisResult {
     const tankConfig = this.tankService.getTankState(data.tankId)?.config;
@@ -73,10 +129,11 @@ export class SloshingService {
     const stabilityIndex = calculateStabilityIndex(gm, data.inclination.x, fillingRatio);
 
     const severity = calculateSloshingSeverity(impactForce, stabilityIndex, fillingRatio);
+    state.severity = severity;
+    state.advancedAnalysisIntervalMs = SEVERITY_TO_ADVANCED_INTERVAL[severity];
 
     const impactLocation = this.findImpactLocation(surfacePoints, params);
-
-    const velocityField = this.calculateVelocityField(t, params, data);
+    const velocityField = this.calculateVelocityFieldLight(t, params, data);
 
     state.lastWaveHeight = waveHeight;
     state.maxImpactForce = Math.max(state.maxImpactForce, impactForce);
@@ -91,6 +148,8 @@ export class SloshingService {
       stabilityIndex,
       waveHeight,
     });
+
+    this.maybeScheduleAdvancedAnalysis(data.tankId, state, data, params, gm, fillingRatio);
 
     return {
       tankId: data.tankId,
@@ -107,6 +166,106 @@ export class SloshingService {
     };
   }
 
+  getLastAdvancedResult(tankId: string): AdvancedAnalysisResult | undefined {
+    return this.analysisStates.get(tankId)?.lastAdvancedResult;
+  }
+
+  private maybeScheduleAdvancedAnalysis(
+    tankId: string,
+    state: TankAnalysisState,
+    data: SensorCleanedData,
+    params: FreeSurfaceParameters,
+    gm: number,
+    fillingRatio: number
+  ): void {
+    const now = Date.now();
+    if (now - state.lastAdvancedAnalysisAt < state.advancedAnalysisIntervalMs) {
+      return;
+    }
+    state.lastAdvancedAnalysisAt = now;
+
+    const priority = this.severityToPriority(state.severity);
+
+    const gzTask: MatrixTask = {
+      id: `gz-${tankId}-${now}`,
+      type: 'gzCurve',
+      payload: {
+        gm,
+        displacement: 200000,
+        beam: params.tankWidth * 1.2,
+        kb: params.fillingHeight * 0.5,
+        bm: params.tankWidth * 0.6,
+        fillingRatio,
+        freeSurfaceEffect: 0.15 + state.lastWaveHeight * 0.05,
+        sloshingMoment: state.maxImpactForce * params.tankWidth * 0.3,
+      },
+    };
+
+    const sensitivityTask: MatrixTask = {
+      id: `sens-${tankId}-${now}`,
+      type: 'stabilitySensitivity',
+      payload: {
+        gzParams: gzTask.payload,
+        perturbations: {
+          gm: 0.05,
+          fillingRatio: 0.02,
+          freeSurfaceEffect: 0.02,
+          sloshingMoment: 1e4,
+          beam: 0.1,
+        },
+      },
+    };
+
+    Promise.all([
+      this.workerPool.submit(gzTask, { priority, tankId, timeoutMs: 3000 }),
+      this.workerPool.submit(sensitivityTask, { priority, tankId, timeoutMs: 3000 }),
+    ])
+      .then(([gzResult, sensResult]) => {
+        if (!gzResult.success || !sensResult.success) {
+          this.logger.warn(
+            `Advanced analysis partially failed for tank ${tankId}: gz=${gzResult.error}, sens=${sensResult.error}`
+          );
+        }
+
+        const advanced: AdvancedAnalysisResult = {
+          gzCurve: gzResult.success ? gzResult.data : state.lastAdvancedResult?.gzCurve,
+          stabilitySensitivities: sensResult.success
+            ? sensResult.data.sensitivities
+            : state.lastAdvancedResult?.stabilitySensitivities,
+        };
+
+        state.lastAdvancedResult = advanced;
+
+        const cbs = this.advancedAnalysisCallbacks.get(tankId);
+        if (cbs) {
+          for (const cb of cbs) {
+            try {
+              cb(tankId, advanced);
+            } catch (err: any) {
+              this.logger.error(`Advanced analysis callback error: ${err.message}`);
+            }
+          }
+        }
+      })
+      .catch((err) => {
+        this.logger.error(`Advanced analysis error for tank ${tankId}: ${err.message}`);
+      });
+  }
+
+  private severityToPriority(severity: SloshingSeverity): 'low' | 'normal' | 'high' | 'critical' {
+    switch (severity) {
+      case SloshingSeverity.EXTREME:
+      case SloshingSeverity.CRITICAL:
+        return 'critical';
+      case SloshingSeverity.HIGH:
+        return 'high';
+      case SloshingSeverity.MODERATE:
+        return 'normal';
+      default:
+        return 'low';
+    }
+  }
+
   private initializeAnalysisState(tankId: string): TankAnalysisState {
     return {
       waveStates: [
@@ -117,6 +276,9 @@ export class SloshingService {
       startTime: Date.now() * 1000,
       lastWaveHeight: 0,
       maxImpactForce: 0,
+      lastAdvancedAnalysisAt: 0,
+      advancedAnalysisIntervalMs: 1000,
+      severity: SloshingSeverity.NONE,
     };
   }
 
@@ -153,11 +315,18 @@ export class SloshingService {
   ): Float32Array {
     const points = new Float32Array(this.SURFACE_SAMPLE_COUNT);
     const state = this.analysisStates.get(data.tankId)!;
+    const s = this.SURFACE_SMOOTHING;
 
     for (let i = 0; i < this.SURFACE_SAMPLE_COUNT; i++) {
       const x = (i / (this.SURFACE_SAMPLE_COUNT - 1) - 0.5) * params.tankLength;
       const y = 0;
-      points[i] = calculateFreeSurfaceElevation(x, y, t, params, data.inclination, state.waveStates);
+      let val = calculateFreeSurfaceElevation(x, y, t, params, data.inclination, state.waveStates);
+
+      if (i >= 2) {
+        val = s * val + (1 - s) * points[i - 1];
+      }
+
+      points[i] = val;
     }
 
     return points;
@@ -202,14 +371,14 @@ export class SloshingService {
     return { x, y: params.tankWidth / 2 };
   }
 
-  private calculateVelocityField(
+  private calculateVelocityFieldLight(
     t: number,
     params: FreeSurfaceParameters,
     data: SensorCleanedData
   ): Array<{ x: number; y: number; u: number; v: number }> {
     const field: Array<{ x: number; y: number; u: number; v: number }> = [];
     const state = this.analysisStates.get(data.tankId)!;
-    const gridSize = 5;
+    const gridSize = 4;
 
     for (let i = 0; i <= gridSize; i++) {
       for (let j = 0; j <= gridSize; j++) {
@@ -228,8 +397,9 @@ export class SloshingService {
           const phase = kx * x + ky * y - omega * t + wave.phase;
           const amplitude = wave.amplitude * decay;
 
-          u += amplitude * omega * Math.cos(phase) * (kx / (kx * kx + ky * ky));
-          v += amplitude * omega * Math.cos(phase) * (ky / (kx * kx + ky * ky));
+          const kNorm = kx * kx + ky * ky + 1e-9;
+          u += amplitude * omega * Math.cos(phase) * (kx / kNorm);
+          v += amplitude * omega * Math.cos(phase) * (ky / kNorm);
         }
 
         u += data.inclination.y * 0.1;

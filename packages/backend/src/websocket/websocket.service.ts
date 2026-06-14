@@ -2,6 +2,22 @@ import { Injectable } from '@nestjs/common';
 import { Server } from 'socket.io';
 import { SensorCleanedData, SloshingAnalysisResult, TankState } from '@vessel/shared';
 
+export interface AdvancedAnalysisPayload {
+  tankId: string;
+  gzCurve?: {
+    angles: number[];
+    gz: number[];
+    maxGZ: number;
+    angleOfMaxGZ: number;
+    range: number;
+  };
+  stabilitySensitivities?: Array<{
+    param: string;
+    sensitivity: number;
+    partialDerivative: number;
+  }>;
+}
+
 @Injectable()
 export class WebsocketService {
   private io: Server | null = null;
@@ -78,6 +94,19 @@ export class WebsocketService {
   }): void {
     if (!this.io) return;
     this.io.emit('system_status', status);
+  }
+
+  broadcastAdvancedAnalysis(tankId: string, payload: AdvancedAnalysisPayload): void {
+    if (!this.io) return;
+    const message = { type: 'advanced_analysis', ...payload, tankId };
+    this.io.to(`tank:${tankId}`).emit('advanced_analysis', message);
+    this.io.emit('advanced_analysis', message);
+    this.stats.messagesSent++;
+  }
+
+  broadcastWorkerMetrics(metrics: any): void {
+    if (!this.io) return;
+    this.io.emit('worker_metrics', { type: 'worker_metrics', ...metrics, timestamp: Date.now() });
   }
 
   clientConnected(): void {

@@ -2,9 +2,10 @@ import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { SensorRawPayload, SensorCleanedData, STRESS_WAVEFORM_SAMPLES } from '@vessel/shared';
 import { InfluxService } from '../influx/influx.service';
 import { TankService } from '../tank/tank.service';
-import { SloshingService } from '../sloshing/sloshing.service';
+import { SloshingService, AdvancedAnalysisResult } from '../sloshing/sloshing.service';
 import { WebsocketService } from '../websocket/websocket.service';
 import { ConfigService } from '../config/config.service';
+import { WorkerPoolService } from '../worker/worker-pool.service';
 
 interface BatchItem {
   data: SensorCleanedData;
@@ -25,23 +26,54 @@ export class DataPipelineService implements OnModuleInit, OnModuleDestroy {
     lastStatsUpdate: Date.now(),
   };
 
+  private cleanupFns: Array<() => void> = [];
+  private metricsTimer: NodeJS.Timeout | null = null;
+
   constructor(
     private influx: InfluxService,
     private tankService: TankService,
     private sloshingService: SloshingService,
     private websocket: WebsocketService,
     private config: ConfigService,
+    private workerPool: WorkerPoolService,
   ) {}
 
   onModuleInit() {
     this.flushTimer = setInterval(() => this.flushAll(), this.flushInterval);
     setInterval(() => this.logStats(), 10000);
+
+    this.metricsTimer = setInterval(() => {
+      const metrics = this.workerPool.getMetrics();
+      this.websocket.broadcastWorkerMetrics(metrics);
+    }, 2000);
+
+    const tankConfigs = this.config.getAllTankConfigs();
+    for (const cfg of tankConfigs) {
+      const unsub = this.sloshingService.onAdvancedAnalysis(
+        cfg.id,
+        (tankId: string, result: AdvancedAnalysisResult) => {
+          this.websocket.broadcastAdvancedAnalysis(tankId, {
+            tankId,
+            gzCurve: result.gzCurve,
+            stabilitySensitivities: result.stabilitySensitivities,
+          });
+        }
+      );
+      this.cleanupFns.push(unsub);
+    }
   }
 
   onModuleDestroy() {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
     }
+    if (this.metricsTimer) {
+      clearInterval(this.metricsTimer);
+    }
+    for (const fn of this.cleanupFns) {
+      try { fn(); } catch (_) {}
+    }
+    this.cleanupFns = [];
     this.flushAll();
   }
 
