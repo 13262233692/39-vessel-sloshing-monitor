@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  emqx:
+    image: emqx/emqx:5.3.0
+    container_name: vessel-emqx
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "8084:8084"
+      - "8883:8883"
+      - "18083:18083"
+    environment:
+      - EMQX_NAME=vessel-emqx
+      - EMQX_HOST=0.0.0.0
+      - EMQX_ALLOW_ANONYMOUS=true
+    volumes:
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+    networks:
+      - vessel-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  influxdb:
+    image: influxdb:2.7.5
+    container_name: vessel-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=vessel123456
+      - DOCKER_INFLUXDB_INIT_ORG=vessel
+      - DOCKER_INFLUXDB_INIT_BUCKET=sloshing
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=vessel-sloshing-token
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    networks:
+      - vessel-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: .
+      dockerfile: packages/backend/Dockerfile
+    container_name: vessel-backend
+    ports:
+      - "3000:3000"
+    environment:
+      - EMQX_HOST=emqx
+      - EMQX_PORT=1883
+      - EMQX_USERNAME=admin
+      - EMQX_PASSWORD=public
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=vessel-sloshing-token
+      - INFLUXDB_ORG=vessel
+      - INFLUXDB_BUCKET=sloshing
+      - BACKEND_PORT=3000
+      - TANK_COUNT=4
+      - SAMPLE_RATE=50
+    depends_on:
+      emqx:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    networks:
+      - vessel-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: packages/frontend/Dockerfile
+    container_name: vessel-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      - vessel-network
+    restart: unless-stopped
+
+  simulator:
+    build:
+      context: .
+      dockerfile: packages/simulator/Dockerfile
+    container_name: vessel-simulator
+    environment:
+      - EMQX_HOST=emqx
+      - EMQX_PORT=1883
+      - EMQX_USERNAME=admin
+      - EMQX_PASSWORD=public
+      - TANK_COUNT=4
+      - SAMPLE_RATE=50
+      - SEVERITY_LEVEL=moderate
+      - WAVE_INTENSITY=1.0
+    depends_on:
+      emqx:
+        condition: service_healthy
+    networks:
+      - vessel-network
+    restart: unless-stopped
+
+volumes:
+  emqx-data:
+  emqx-log:
+  influxdb-data:
+  influxdb-config:
+
+networks:
+  vessel-network:
+    driver: bridge

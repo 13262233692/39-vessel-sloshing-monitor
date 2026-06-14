@@ -1,0 +1,96 @@
+import { Injectable } from '@nestjs/common';
+import { Server } from 'socket.io';
+import { SensorCleanedData, SloshingAnalysisResult, TankState } from '@vessel/shared';
+
+@Injectable()
+export class WebsocketService {
+  private io: Server | null = null;
+  private stats = {
+    messagesSent: 0,
+    clientsConnected: 0,
+  };
+
+  setServer(io: Server): void {
+    this.io = io;
+  }
+
+  broadcastTankData(sensorData: SensorCleanedData, analysis: SloshingAnalysisResult): void {
+    if (!this.io) return;
+
+    const message = {
+      type: 'tank_update',
+      tankId: sensorData.tankId,
+      timestampUs: sensorData.timestampUs,
+      sensor: {
+        inclination: sensorData.inclination,
+        liquidLevel: sensorData.liquidLevel,
+        pressure: sensorData.pressure,
+        temperature: sensorData.temperature,
+        stressWaveform: Array.from(sensorData.stressWaveform),
+        signalQuality: sensorData.signalQuality,
+      },
+      analysis: {
+        severity: analysis.severity,
+        impactForce: analysis.impactForce,
+        impactLocation: analysis.impactLocation,
+        stabilityIndex: analysis.stabilityIndex,
+        naturalFrequency: analysis.naturalFrequency,
+        waveHeight: analysis.waveHeight,
+        wavePeriod: analysis.wavePeriod,
+        surfacePoints: Array.from(analysis.surfacePoints),
+        velocityField: analysis.velocityField,
+      },
+    };
+
+    this.io.to(`tank:${sensorData.tankId}`).emit('tank_data', message);
+    this.io.emit('tank_update', message);
+    this.stats.messagesSent++;
+  }
+
+  broadcastAllTankStates(states: TankState[]): void {
+    if (!this.io) return;
+
+    this.io.emit('all_tanks', {
+      type: 'all_tanks',
+      states: states.map((s) => ({
+        id: s.id,
+        name: s.config.name,
+        position: s.config.position,
+        dimensions: s.config.dimensions,
+        lastUpdateUs: s.lastUpdateUs,
+        currentLevel: s.currentLevel,
+        currentPressure: s.currentPressure,
+        currentTemperature: s.currentTemperature,
+        inclination: s.inclination,
+        sloshingSeverity: s.sloshingSeverity,
+        impactForce: s.impactForce,
+        stabilityIndex: s.stabilityIndex,
+        fillingRatio: s.config.fillingRatio,
+      })),
+    });
+  }
+
+  broadcastSystemStatus(status: {
+    mqttConnected: boolean;
+    influxConnected: boolean;
+    messageRate: number;
+    tankCount: number;
+  }): void {
+    if (!this.io) return;
+    this.io.emit('system_status', status);
+  }
+
+  clientConnected(): void {
+    this.stats.clientsConnected++;
+    console.log(`[WebSocket] Client connected. Total: ${this.stats.clientsConnected}`);
+  }
+
+  clientDisconnected(): void {
+    this.stats.clientsConnected = Math.max(0, this.stats.clientsConnected - 1);
+    console.log(`[WebSocket] Client disconnected. Total: ${this.stats.clientsConnected}`);
+  }
+
+  getStats() {
+    return { ...this.stats };
+  }
+}

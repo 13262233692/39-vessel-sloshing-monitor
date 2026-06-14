@@ -1,0 +1,23 @@
+{
+  "name": "vessel-sloshing-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:backend": "npm run dev --workspace=@vessel/backend",
+    "dev:frontend": "npm run dev --workspace=@vessel/frontend",
+    "dev:simulator": "npm run dev --workspace=@vessel/simulator",
+    "dev": "concurrently \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "build:backend": "npm run build --workspace=@vessel/backend",
+    "build:frontend": "npm run build --workspace=@vessel/frontend",
+    "build": "npm run build:backend && npm run build:frontend",
+    "start:backend": "npm run start --workspace=@vessel/backend",
+    "start:frontend": "npm run preview --workspace=@vessel/frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.3.3"
+  }
+}

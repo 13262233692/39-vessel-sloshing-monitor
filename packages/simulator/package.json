@@ -1,0 +1,20 @@
+{
+  "name": "@vessel/simulator",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "mqtt": "^5.3.4",
+    "@vessel/shared": "^1.0.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
